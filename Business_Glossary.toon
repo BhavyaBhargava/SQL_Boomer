@@ -1,0 +1,13 @@
+glossary[12]{term,definition,logic_hint}:
+  Active Lot,A lot that is currently under construction and not closed,"Status IN ('Permit', 'Framing', 'Drywall', 'Finishes')"
+  Closed Lot,A home that has been fully built and sold to the buyer,Status = 'Closed'
+  Dead Deal,A contract that was cancelled before closing,Status = 'Cancelled'
+  Big Ticket,Any home sale with a total value exceeding $750k,SalePrice > 750000
+  Schedule Hold,A lot where construction is paused due to schedule delays,HoldReason = 'Schedule' AND IsResolved = 0
+  Permit Hold,A lot waiting on city permits before foundation pouring,HoldReason = 'Permit' AND IsResolved = 0
+  Quick Move-In,A home fully built without a buyer yet (Spec home),IsSpec = 1 AND Status = 'Complete'
+  To Be Built,A home sold before construction begins,IsSpec = 0 AND Status = 'Pre-Construction'
+  Closing Soon,Homes scheduled to close in the next 30 days,"ClosingDate BETWEEN date('now', 'localtime') AND date('now', '+30 days', 'localtime')"
+  Stale Inventory,Spec homes completed over 90 days ago without a sale,"IsSpec = 1 AND Status = 'Complete' AND CompletionDate < date('now', '-90 days', 'localtime')"
+  East Region,Communities located in the Eastern division,Region = 'East'
+  Top Tier Builder,Builders with a rating of A or A+,"BuilderRating IN ('A', 'A+')"

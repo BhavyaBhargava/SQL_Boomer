@@ -1,0 +1,48 @@
+tables[6]:
+  - table_name: tblLots
+    description: Core table tracking individual houses/lots.
+    columns[7]: LotID (INT),CommunityIDfk (INT),BuilderIDfk (INT),LotNumber (VARCHAR),Status (VARCHAR),BasePrice (DECIMAL),IsSpec (INT)
+    pk[1]: LotID
+    fks[2]:
+      - column: CommunityIDfk
+        references: tblCommunities.CommunityID
+      - column: BuilderIDfk
+        references: tblBuilders.BuilderID
+    accepted_values: Status IN ('Pre-Construction', 'Permit', 'Framing', 'Drywall', 'Finishes', 'Complete', 'Closed', 'Cancelled'), IsSpec IN (0, 1)
+
+  - table_name: tblCommunities
+    description: Grouping of lots into a specific neighborhood.
+    columns[4]: CommunityID (INT),CommunityName (VARCHAR),Region (VARCHAR),TotalLots (INT)
+    pk[1]: CommunityID
+    accepted_values: Region IN ('East', 'West', 'North', 'South', 'Central')
+
+  - table_name: tblBuilders
+    description: Contracting companies responsible for building the homes.
+    columns[4]: BuilderID (INT),BuilderName (VARCHAR),BuilderRating (VARCHAR),ActiveStatus (INT)
+    pk[1]: BuilderID
+    accepted_values: BuilderRating IN ('A+', 'A', 'B', 'C'), ActiveStatus IN (0, 1)
+
+  - table_name: tblSales
+    description: Transaction records for home purchases. Dates format is YYYY-MM-DD HH:MM:SS.
+    columns[6]: SaleID (INT),LotIDfk (INT),SaleDate (DATETIME),SalePrice (DECIMAL),BuyerName (VARCHAR),ClosingDate (DATETIME)
+    pk[1]: SaleID
+    fks[1]:
+      - column: LotIDfk
+        references: tblLots.LotID
+
+  - table_name: tblHolds
+    description: Tracks pauses or delays in construction.
+    columns[5]: HoldID (INT),LotIDfk (INT),HoldReason (VARCHAR),StartDate (DATETIME),IsResolved (INT)
+    pk[1]: HoldID
+    fks[1]:
+      - column: LotIDfk
+        references: tblLots.LotID
+    accepted_values: HoldReason IN ('Schedule', 'Permit', 'Material', 'Buyer'), IsResolved IN (0, 1)
+
+  - table_name: tblMilestones
+    description: Tracks major construction completion dates per lot. Dates format is YYYY-MM-DD HH:MM:SS.
+    columns[5]: MilestoneID (INT),LotIDfk (INT),TrenchDate (DATETIME),FramingDate (DATETIME),CompletionDate (DATETIME)
+    pk[1]: MilestoneID
+    fks[1]:
+      - column: LotIDfk
+        references: tblLots.LotID

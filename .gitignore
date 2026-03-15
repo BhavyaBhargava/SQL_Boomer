@@ -1,0 +1,7 @@
+# Ignore all SQLite/database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Ignore all directories/folders
+/*/
