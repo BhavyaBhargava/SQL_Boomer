@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 from query_intelligence_service import (
     execute_agentic_workflow, 
     parse_rag_response, 
-    generate_smart_suggestions
+    generate_smart_suggestions,
+    generate_predictive_followups
 )
 from session_memory_store import (
     load_history_from_local_file, 
@@ -534,7 +535,34 @@ async def execute_and_return_excel(request_data: QueryRequest):
 
 @app.get("/api/v1/session/{session_id}/suggestions")
 async def get_smart_suggestions_endpoint(session_id: UUID):
-    raw_history = get_raw_session_history(str(session_id))
-    loop = asyncio.get_event_loop()
-    suggestions = await loop.run_in_executor(sql_executor, lambda: asyncio.run(generate_smart_suggestions(raw_history)))
+    raw_history = await get_raw_session_history_async(str(session_id), sql_executor)
+    suggestions = await generate_smart_suggestions(raw_history)
     return {"suggestions": suggestions}
+
+@app.post("/get_predictive_followups")
+@app.post("/api/v1/query/predictive_followups")
+async def get_predictive_followups_endpoint(request_data: QueryRequest):
+    """
+    Analyzes current query, recent trajectory, schema, and glossary to
+    generate 4 actionable, user-perspective predictive follow-up buttons.
+    """
+    session_id_str = str(request_data.session_id)
+    user_input = request_data.user_input.strip()
+
+    fallback_buttons = [
+        "Group these results by community name.",
+        "Filter for records created in the last 30 days.",
+        "Show total base price across all builders.",
+        "Sort these lots by highest base price."
+    ]
+
+    if not user_input or len(user_input) < 3:
+        return {"followups": fallback_buttons}
+
+    try:
+        history = await load_history_async(session_id_str, sql_executor)
+        followups = await generate_predictive_followups(user_input, history, session_id_str)
+        return {"followups": followups}
+    except Exception as e:
+        logger.error(f"[API Error] /get_predictive_followups failed for session {session_id_str}: {e}")
+        return {"followups": fallback_buttons}

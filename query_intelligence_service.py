@@ -401,3 +401,98 @@ async def generate_smart_suggestions(history_data: list[dict]) -> list[str]:
     except Exception as e:
         logger.error(f"Suggestion Gen Error: {e}")
         return default_suggestions
+
+# ==============================================================================
+# 7. PREDICTIVE ACTION FOLLOW-UPS (NATIVE OPENAI)
+# ==============================================================================
+async def generate_predictive_followups(input_text: str, history: list[BaseMessage], session_id: str = "") -> list[str]:
+    """
+    Generates 4 clickable, forward-looking follow-up action buttons from the USER'S
+    perspective based on the current question, trajectory, schema, and glossary.
+    """
+    default_actions = [
+        "Group these results by community name.",
+        "Filter for records created in the last 30 days.",
+        "Show total base price across all builders.",
+        "Sort these lots by highest base price."
+    ]
+
+    if not input_text or len(input_text.strip()) < 3:
+        return default_actions
+
+    try:
+        # 1. Retrieve top schema context
+        schema_retriever = get_schema_retriever()
+        schema_docs = schema_retriever.invoke(input_text)[:4] if schema_retriever else []
+        schema_summary = "\n---\n".join([d.page_content[:800] for d in schema_docs]) if schema_docs else "No schema found."
+
+        # 2. Retrieve top glossary terminology
+        global _glossary_ensemble
+        if _glossary_ensemble is None:
+            _build_glossary_retrievers()
+
+        glossary_summary = "No business terminology found."
+        if _glossary_ensemble:
+            glossary_docs = await _glossary_ensemble.ainvoke(input_text)
+            if glossary_docs:
+                glossary_summary = "\n".join([f"- {d.page_content[:200]}" for d in glossary_docs[:4]])
+
+        # 3. Extract user questions trajectory (last 5 user queries)
+        user_queries = []
+        for msg in history[-12:]:
+            if isinstance(msg, HumanMessage):
+                q = msg.additional_kwargs.get("standalone_query") or msg.content
+                clean_q = re.sub(r"^\[Sent at:.*?\]\s*", "", q).strip()
+                if clean_q:
+                    user_queries.append(clean_q)
+
+        user_trajectory = user_queries[-5:]
+        trajectory_str = "\n".join([f"- {q}" for q in user_trajectory]) if user_trajectory else "None."
+
+        # 4. Construct perspective-driven system prompt
+        followup_sys_prompt = """You are an intelligent data copilot recommending the USER's next 4 actions.
+Generate exactly 4 concise, actionable button labels written from the USER's viewpoint.
+
+CRITICAL PERSPECTIVE RULES:
+1. WRITE AS THE USER: These are buttons the user will click to send as their next message.
+2. BAN ASSISTANT PHRASES: NEVER use "Would you like...", "Do you want me to...", "I can show you...", or question the user.
+3. USE IMPERATIVE COMMANDS OR DIRECT INQUIRIES: E.g., "Group these results by...", "Filter to show only...", "What is the average base price for...", "Show lots on schedule hold".
+4. SPECIFIC & GROUNDED: Use actual fields and concepts from the schema (Lots, Communities, Builders, Sales, Milestones, BasePrice, Region).
+5. FORMAT: Return ONLY a valid JSON array of 4 strings. No markdown backticks, no markdown code blocks, no preamble."""
+
+        followup_user_prompt = f"""Current Query:
+{input_text}
+
+User Query History Trajectory:
+{trajectory_str}
+
+Relevant Schema Context:
+{schema_summary}
+
+Relevant Business Glossary Terms:
+{glossary_summary}
+
+Generate 4 user-perspective follow-up action buttons as a JSON array of strings."""
+
+        response = await openai_client.chat.completions.create(
+            model="nvidia/nemotron-3-super-120b-a12b:free",
+            messages=[
+                {"role": "system", "content": followup_sys_prompt},
+                {"role": "user", "content": followup_user_prompt}
+            ],
+            temperature=0.3
+        )
+
+        raw_content = response.choices[0].message.content or ""
+        clean_content = re.sub(r'^```(?:json)?\s*', '', raw_content.strip(), flags=re.IGNORECASE)
+        clean_content = re.sub(r'```\s*$', '', clean_content)
+        
+        parsed = json.loads(clean_content)
+        if isinstance(parsed, list) and len(parsed) >= 4:
+            return [str(item).strip() for item in parsed[:4]]
+
+        return default_actions
+
+    except Exception as exc:
+        logger.warning(f"Predictive follow-ups generation fallback: {exc}")
+        return default_actions
