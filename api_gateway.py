@@ -30,7 +30,9 @@ from query_intelligence_service import (
     execute_agentic_workflow, 
     parse_rag_response, 
     generate_smart_suggestions,
-    generate_predictive_followups
+    generate_predictive_followups,
+    reload_glossary_cache,
+    PERSISTENT_GLOSSARY_DIR
 )
 from session_memory_store import (
     load_history_from_local_file, 
@@ -39,7 +41,9 @@ from session_memory_store import (
     load_history_async,
     save_history_async,
     get_raw_session_history_async,
-    rollback_cancelled_turn_async
+    rollback_cancelled_turn_async,
+    parse_glossary_file,
+    rotate_glossary_snapshots
 )
 
 app = FastAPI(title="SQL Boomer: Making Database interactions easy")
@@ -566,3 +570,86 @@ async def get_predictive_followups_endpoint(request_data: QueryRequest):
     except Exception as e:
         logger.error(f"[API Error] /get_predictive_followups failed for session {session_id_str}: {e}")
         return {"followups": fallback_buttons}
+
+@app.post("/manage_business_glossary")
+@app.post("/api/v1/glossary/manage")
+async def manage_business_glossary(
+    action: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    version: Optional[str] = Form(None),
+    end_row: Optional[int] = Form(None)
+):
+    """
+    Unified administration endpoint for Business Glossary lifecycle management:
+    - action="upload": parses new Excel/CSV/JSON, slides backups, hot-reloads vector cache.
+    - action="rollback": restores glossary from version backup ('v1' or 'v2') and hot-reloads.
+    """
+    os.makedirs(PERSISTENT_GLOSSARY_DIR, exist_ok=True)
+    parsed_records = []
+
+    action_clean = action.strip().lower()
+
+    if action_clean == "upload":
+        if not file:
+            raise HTTPException(status_code=400, detail="A valid file is required for the upload action.")
+
+        filename = file.filename or "glossary_upload.csv"
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in [".csv", ".xlsx", ".xls", ".json"]:
+            raise HTTPException(status_code=400, detail="Only .csv, .xlsx, and .json files are supported.")
+
+        file_bytes = await file.read()
+        try:
+            loop = asyncio.get_running_loop()
+            parsed_records = await loop.run_in_executor(
+                excel_executor,
+                parse_glossary_file,
+                file_bytes,
+                filename,
+                end_row
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to parse glossary file: {str(exc)}")
+
+    elif action_clean == "rollback":
+        if not version or version.lower() not in ["v1", "v2"]:
+            raise HTTPException(status_code=400, detail="Valid rollback version ('v1' or 'v2') must be specified.")
+
+        target_file = os.path.join(PERSISTENT_GLOSSARY_DIR, f"Business_Glossary_{version.lower()}.json")
+        if not os.path.exists(target_file):
+            raise HTTPException(status_code=404, detail=f"Glossary backup snapshot '{version}' not found.")
+
+        try:
+            with open(target_file, 'r', encoding='utf-8') as f:
+                parsed_records = json.load(f)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read backup snapshot {version}: {str(exc)}")
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action. Use 'upload' or 'rollback'.")
+
+    # Pipeline: Version rotation, active persistence, and zero-downtime hot-reload
+    try:
+        loop = asyncio.get_running_loop()
+        
+        # 1. Rotate backups: active -> v1 -> v2
+        await loop.run_in_executor(sql_executor, rotate_glossary_snapshots, PERSISTENT_GLOSSARY_DIR)
+
+        # 2. Persist new active JSON glossary
+        active_path = os.path.join(PERSISTENT_GLOSSARY_DIR, "Business_Glossary.json")
+        with open(active_path, 'w', encoding='utf-8') as f:
+            json.dump(parsed_records, f, indent=2)
+
+        # 3. Hot-reload vector and BM25 retrievers in RAM atomically
+        await loop.run_in_executor(sql_executor, reload_glossary_cache)
+
+        status_msg = "Business glossary updated and vector cache reloaded successfully." if action_clean == "upload" else f"Business glossary rolled back to {version} and reloaded."
+        return {
+            "status": "success",
+            "message": status_msg,
+            "total_terms": len(parsed_records)
+        }
+
+    except Exception as exc:
+        logger.error(f"Glossary management pipeline error: {exc}")
+        raise HTTPException(status_code=500, detail=f"Glossary operation failed: {str(exc)}")

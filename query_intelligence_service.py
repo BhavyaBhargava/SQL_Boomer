@@ -7,6 +7,7 @@ import hashlib
 import logging
 import asyncio
 import json
+import threading
 from datetime import datetime
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -69,6 +70,7 @@ PERSISTENT_SCHEMA_PATH = os.path.join(PERSISTENT_SCHEMA_DIR, RAW_SCHEMA_FILENAME
 PERSISTENT_INDEX_PATH = os.path.join(PERSISTENT_SCHEMA_DIR, "faiss_schema_index")
 
 PERSISTENT_GLOSSARY_PATH = os.path.join(PERSISTENT_GLOSSARY_DIR, GLOSSARY_FILENAME)
+PERSISTENT_GLOSSARY_JSON_PATH = os.path.join(PERSISTENT_GLOSSARY_DIR, "Business_Glossary.json")
 PERSISTENT_GLOSSARY_INDEX_PATH = os.path.join(PERSISTENT_GLOSSARY_DIR, "faiss_glossary_index")
 
 DEPLOYMENT_SCHEMA_PATH = os.path.join(".", RAW_SCHEMA_FILENAME)
@@ -164,46 +166,82 @@ class TransparentAsyncEnsembleRetriever(BaseRetriever):
 
 
 _glossary_ensemble = None
+glossary_lock = threading.Lock()
 
 def _build_glossary_retrievers(force_rebuild=False):
     global _glossary_ensemble
     
-    if _glossary_ensemble is not None and not force_rebuild:
-        return
+    with glossary_lock:
+        if _glossary_ensemble is not None and not force_rebuild:
+            return
 
-    if not os.path.exists(PERSISTENT_GLOSSARY_PATH): 
-        return
+        data = []
+        # Priority: Check active JSON first, fallback to TOON
+        if os.path.exists(PERSISTENT_GLOSSARY_JSON_PATH):
+            try:
+                with open(PERSISTENT_GLOSSARY_JSON_PATH, 'r', encoding='utf-8') as f:
+                    raw_data = json.load(f)
+                    data = raw_data.get("glossary", raw_data) if isinstance(raw_data, dict) else raw_data
+            except Exception as e:
+                logger.error(f"Failed to load glossary from JSON ({PERSISTENT_GLOSSARY_JSON_PATH}): {e}")
+        elif os.path.exists(PERSISTENT_GLOSSARY_PATH):
+            try:
+                with open(PERSISTENT_GLOSSARY_PATH, 'r', encoding='utf-8') as f:
+                    parsed_toon = toon.decode(f.read())
+                    data = parsed_toon.get("glossary", [])
+            except Exception as e:
+                logger.error(f"Failed to load glossary from TOON ({PERSISTENT_GLOSSARY_PATH}): {e}")
 
-    with open(PERSISTENT_GLOSSARY_PATH, 'r', encoding='utf-8') as f:
-        # 1. Decode the TOON file into a dictionary
-        parsed_toon = toon.decode(f.read())
-        
-    # 2. THE FIX: Extract the actual list of objects using the 'glossary' root key
-    data = parsed_toon.get("glossary", [])
+        if not data or not isinstance(data, list):
+            return
 
-    # Now 'e' is guaranteed to be a dictionary, so .get() will work perfectly!
-    docs = [Document(
-        page_content=f"Term: {e.get('term', '')}\nDefinition: {e.get('definition', '')}\nLogic: {e.get('logic_hint', '')}", 
-        metadata={"term": e.get("term", "")}
-    ) for e in data]
+        docs = []
+        for e in data:
+            if not isinstance(e, dict):
+                continue
+            term = e.get('term', '')
+            synonyms = e.get('synonyms', [])
+            syn_str = f"Synonyms: {', '.join(synonyms)}\n" if synonyms else ""
+            definition = e.get('definition', '')
+            logic = e.get('logic_hint', '')
+            page_content = f"Term: {term}\n{syn_str}Definition: {definition}\nLogic: {logic}".strip()
+            docs.append(Document(page_content=page_content, metadata={"term": term}))
 
-    if not docs: return
+        if not docs:
+            return
 
-    if force_rebuild or not os.path.exists(PERSISTENT_GLOSSARY_INDEX_PATH):
-        faiss_vectorstore = FAISS.from_documents(docs, embeddings)
-        faiss_vectorstore.save_local(PERSISTENT_GLOSSARY_INDEX_PATH)
-    else:
-        faiss_vectorstore = FAISS.load_local(PERSISTENT_GLOSSARY_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+        if force_rebuild or not os.path.exists(PERSISTENT_GLOSSARY_INDEX_PATH):
+            faiss_vectorstore = FAISS.from_documents(docs, embeddings)
+            faiss_vectorstore.save_local(PERSISTENT_GLOSSARY_INDEX_PATH)
+        else:
+            faiss_vectorstore = FAISS.load_local(PERSISTENT_GLOSSARY_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
 
-    faiss_retriever = faiss_vectorstore.as_retriever(search_kwargs={"k": 5})
-    bm25_retriever = BM25Retriever.from_documents(docs)
-    bm25_retriever.k = 5
+        faiss_retriever = faiss_vectorstore.as_retriever(search_kwargs={"k": 5})
+        bm25_retriever = BM25Retriever.from_documents(docs)
+        bm25_retriever.k = 5
 
-    _glossary_ensemble = TransparentAsyncEnsembleRetriever(
-        retrievers=[faiss_retriever, bm25_retriever],
-        weights=[0.5, 0.5],
-        top_k=3
-    )
+        _glossary_ensemble = TransparentAsyncEnsembleRetriever(
+            retrievers=[faiss_retriever, bm25_retriever],
+            weights=[0.5, 0.5],
+            top_k=3
+        )
+
+def reload_glossary_cache():
+    """
+    Safely invalidates in-memory glossary retriever cache and pre-warms the new index.
+    Thread-safe and provides zero-downtime hot-reloading for ongoing queries.
+    """
+    global _glossary_ensemble
+    logger.info("[GLOSSARY HOT-RELOAD] Invalidating and rebuilding business glossary index...")
+    
+    if os.path.exists(PERSISTENT_GLOSSARY_INDEX_PATH):
+        try:
+            shutil.rmtree(PERSISTENT_GLOSSARY_INDEX_PATH)
+        except Exception as e:
+            logger.warning(f"Could not remove old glossary FAISS directory: {e}")
+
+    _build_glossary_retrievers(force_rebuild=True)
+    logger.info("[GLOSSARY HOT-RELOAD] Glossary index rebuilt successfully.")
 
 # ==============================================================================
 # 3. SCHEMA LOADING (TOON NATIVE)
