@@ -3,7 +3,10 @@
 import json
 import os
 import re
+import asyncio
 from datetime import datetime
+from typing import Optional
+from concurrent.futures import Executor
 import pytz
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
@@ -151,3 +154,70 @@ def get_raw_session_history(session_id: str) -> list[dict]:
             except json.JSONDecodeError:
                 return [] 
     return []
+
+# ==============================================================================
+# CONCURRENCY LOCKS & ASYNC WRAPPERS
+# ==============================================================================
+_session_locks: dict[str, asyncio.Lock] = {}
+
+def get_session_lock(session_id: str) -> asyncio.Lock:
+    """Returns or creates an asyncio.Lock specific to the given session_id."""
+    if session_id not in _session_locks:
+        _session_locks[session_id] = asyncio.Lock()
+    return _session_locks[session_id]
+
+def remove_cancelled_interaction(session_id: str) -> bool:
+    """
+    Removes the most recent interaction turn (highest chat_id) from the session log.
+    Used when a user interrupts or cancels a query mid-stream to prevent incomplete state.
+    """
+    filepath = get_history_file_path(session_id)
+    if not os.path.exists(filepath):
+        return False
+
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    if not data or not isinstance(data, list):
+        return False
+
+    turn_ids = [item.get("chat_id") for item in data if isinstance(item.get("chat_id"), int)]
+    if not turn_ids:
+        return False
+
+    max_turn_id = max(turn_ids)
+    pruned_data = [item for item in data if item.get("chat_id") != max_turn_id]
+
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(pruned_data, f, indent=2)
+        return True
+    except OSError:
+        return False
+
+async def load_history_async(session_id: str, executor: Optional[Executor] = None) -> list[BaseMessage]:
+    """Thread-safe and session-locked async loading of session history."""
+    async with get_session_lock(session_id):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, load_history_from_local_file, session_id)
+
+async def save_history_async(session_id: str, new_history: list[BaseMessage], executor: Optional[Executor] = None) -> None:
+    """Thread-safe and session-locked async saving of session history."""
+    async with get_session_lock(session_id):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(executor, save_history_to_local_file, session_id, new_history)
+
+async def get_raw_session_history_async(session_id: str, executor: Optional[Executor] = None) -> list[dict]:
+    """Thread-safe and session-locked async reading of raw JSON history."""
+    async with get_session_lock(session_id):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, get_raw_session_history, session_id)
+
+async def rollback_cancelled_turn_async(session_id: str, executor: Optional[Executor] = None) -> bool:
+    """Thread-safe and session-locked async rollback of the last uncommitted turn."""
+    async with get_session_lock(session_id):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, remove_cancelled_interaction, session_id)
