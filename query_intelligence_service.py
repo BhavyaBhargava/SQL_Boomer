@@ -7,6 +7,7 @@ import hashlib
 import logging
 import asyncio
 import json
+from datetime import datetime
 from typing import List, Optional
 from dotenv import load_dotenv
 
@@ -260,7 +261,9 @@ def _convert_lc_history_to_openai(history: list[BaseMessage]) -> list[dict]:
 # ==============================================================================
 # 5. AGENTIC FIREWALL & SQL GENERATION (NATIVE OPENAI)
 # ==============================================================================
-async def execute_agentic_workflow(user_input: str, history: list[BaseMessage], client_time: str):
+async def execute_agentic_workflow(user_input: str, history: list[BaseMessage], client_time: Optional[str] = None):
+    if not client_time:
+        client_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # 1. ALWAYS SYNC FIRST (This automatically rebuilds FAISS if needed)
     sync_config_files()
     

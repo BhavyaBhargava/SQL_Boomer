@@ -271,7 +271,7 @@ async def execute_and_summarize(request_data: QueryRequest):
     history = load_history_from_local_file(session_id_str)
     
     try:
-        rag_answer, updated_history = await execute_agentic_workflow(user_input, history)
+        rag_answer, updated_history = await execute_agentic_workflow(user_input, history, client_time)
         save_history_to_local_file(session_id_str, updated_history)
     except Exception as e:
         return QuerySummaryResponse(
