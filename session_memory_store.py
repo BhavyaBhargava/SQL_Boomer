@@ -4,6 +4,7 @@ import json
 import os
 import re
 import io
+import csv
 import asyncio
 from datetime import datetime
 from typing import Optional
@@ -275,7 +276,14 @@ def parse_glossary_file(file_content: bytes, filename: str, end_row: Optional[in
 
     # For CSV or Excel:
     if ext == '.csv':
-        df = pd.read_csv(io.BytesIO(file_content), header=None, dtype=str)
+        text_content = file_content.decode('utf-8', errors='replace')
+        reader = csv.reader(io.StringIO(text_content))
+        raw_rows = list(reader)
+        if not raw_rows:
+            return []
+        max_len = max(len(r) for r in raw_rows)
+        padded_rows = [r + [''] * (max_len - len(r)) for r in raw_rows]
+        df = pd.DataFrame(padded_rows)
     elif ext in ['.xlsx', '.xls']:
         df = pd.read_excel(io.BytesIO(file_content), header=None, dtype=str)
     else:
