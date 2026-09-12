@@ -345,13 +345,17 @@ async def execute_agentic_workflow(user_input: str, history: list[BaseMessage], 
     reformulator_messages.extend(_convert_lc_history_to_openai(history))
     reformulator_messages.append({"role": "user", "content": user_input})
 
-    reformulate_response = await openai_client.chat.completions.create(
-        model=REFORMULATOR_MODEL,
-        messages=reformulator_messages,
-        temperature=0
-    )
-    # Fall back to the original user input if the model returns None
-    standalone_question = reformulate_response.choices[0].message.content or user_input
+    try:
+        reformulate_response = await openai_client.chat.completions.create(
+            model=REFORMULATOR_MODEL,
+            messages=reformulator_messages,
+            temperature=0
+        )
+        # Fall back to the original user input if the model returns None
+        standalone_question = reformulate_response.choices[0].message.content or user_input
+    except Exception as e:
+        logger.warning(f"Reformulation API call failed ({e}). Falling back to original input.")
+        standalone_question = user_input
 
     # --- PHASE 2: SQL GENERATOR ---
     schema_retriever = get_schema_retriever()
@@ -390,13 +394,17 @@ async def execute_agentic_workflow(user_input: str, history: list[BaseMessage], 
         {"role": "user", "content": standalone_question}
     ]
 
-    sql_response = await openai_client.chat.completions.create(
-        model=SQL_MODEL,
-        messages=sql_messages,
-        temperature=0
-    )
-    # Fall back to a NO_SQL flag so the API handles it gracefully instead of crashing
-    raw_response = sql_response.choices[0].message.content or "1. Technical Reasoning: API Failure\n2. Layman Explanation: The AI model failed to return a response.\n3. ```sql\nNO_SQL\n```"
+    try:
+        sql_response = await openai_client.chat.completions.create(
+            model=SQL_MODEL,
+            messages=sql_messages,
+            temperature=0
+        )
+        # Fall back to a NO_SQL flag so the API handles it gracefully instead of crashing
+        raw_response = sql_response.choices[0].message.content or "1. Technical Reasoning: API Failure\n2. Layman Explanation: The AI model failed to return a response.\n3. ```sql\nNO_SQL\n```"
+    except Exception as e:
+        logger.warning(f"SQL Generation API call failed ({e}). Returning graceful fallback.")
+        raw_response = "1. Technical Reasoning: API Failure\n2. Layman Explanation: The AI model failed to return a response.\n3. ```sql\nNO_SQL\n```"
 
     # Update state and attach the CLIENT'S exact timestamp
     human_msg = HumanMessage(content=user_input)
