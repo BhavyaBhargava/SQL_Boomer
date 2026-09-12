@@ -4,13 +4,15 @@ import io
 import os
 import re
 import json
+import time
+import logging
 import asyncio
 from datetime import datetime
 from uuid import UUID, uuid4
 from concurrent.futures import ThreadPoolExecutor
-from typing import Tuple, Generator, Any
+from typing import Tuple, Generator, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Body, Response
+from fastapi import FastAPI, HTTPException, Body, Response, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -19,6 +21,9 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
 from sqlalchemy import create_engine, text
 from langchain_community.utilities.sql_database import SQLDatabase
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- Local Services ---
 from query_intelligence_service import (
@@ -29,7 +34,11 @@ from query_intelligence_service import (
 from session_memory_store import (
     load_history_from_local_file, 
     save_history_to_local_file, 
-    get_raw_session_history
+    get_raw_session_history,
+    load_history_async,
+    save_history_async,
+    get_raw_session_history_async,
+    rollback_cancelled_turn_async
 )
 
 app = FastAPI(title="SQL Boomer: Making Database interactions easy")
@@ -41,6 +50,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==============================================================================
+# CANCELLATION ENGINE & PROGRESSIVE WARNING SCHEDULE
+# ==============================================================================
+class QueryCancelledError(Exception):
+    """Raised when an ongoing query execution is aborted by user request."""
+    pass
+
+active_cancellations: dict[str, asyncio.Event] = {}
+
+PROGRESSIVE_WARNING_SCHEDULE = [
+    (45.0, "This request requires analyzing complex database relationships. Thank you for your patience as we process..."),
+    (90.0, "Still compiling and optimizing the query plan against business logic rules..."),
+    (135.0, "Extended query synthesis in progress. Validating table schema mappings..."),
+    (180.0, "Thank you for holding on. Assembling and formatting database instructions..."),
+    (225.0, "Deep analytical scan in progress. Finalizing database execution...")
+]
 
 # ==============================================================================
 # 0. CONCURRENCY & DEDICATED THREAD POOLS
@@ -295,82 +321,188 @@ async def execute_and_summarize(request_data: QueryRequest):
     if len(user_input) < 3:
         raise HTTPException(400, "Please provide a valid question.")
 
-    engine = get_db_engine()
-    history = load_history_from_local_file(session_id_str)
-    
-    try:
-        rag_answer, updated_history = await execute_agentic_workflow(user_input, history, client_time)
-        save_history_to_local_file(session_id_str, updated_history)
-    except Exception as e:
-        return QuerySummaryResponse(
-            session_id=request_data.session_id, tech_summary="API Error", gen_summary="System error.",
-            error=str(e), message=_get_friendly_error("connection_error", str(e))
-        )
+    cancel_event = asyncio.Event()
+    active_cancellations[session_id_str] = cancel_event
 
-    raw_sql, tech_summary, gen_summary = parse_rag_response(rag_answer)
+    async def query_pipeline_stream():
+        start_time = time.perf_counter()
+        warning_index = 0
+        history_persisted = False
+        llm_task = None
 
-    # ---> The SQL Formatter Safety Net <---
-    if raw_sql and raw_sql != "NO_SQL":
-        # Force a space between any alphanumeric character/quote and a major SQL keyword.
-        # Strict capitalization prevents splitting columns like "ActiveFrom"
-        raw_sql = re.sub(
-            r'([a-zA-Z0-9_\]\'\"])(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|GROUP BY|ORDER BY|LIMIT|HAVING)\b', 
-            r'\1 \n\2', 
-            raw_sql 
-        )
-    # --------------------------------------------------------
+        try:
+            # 1. Thread-safe & session-locked history loading
+            history = await load_history_async(session_id_str, sql_executor)
 
-    # Conversational Bypass
-    if raw_sql and "NO_SQL" in raw_sql:
-        async def conv_stream():
-            yield json.dumps({"type": "metadata", "session_id": session_id_str, "tech_summary": "Chat", "gen_summary": gen_summary}) + "\n"
-        return StreamingResponse(conv_stream(), media_type="application/x-ndjson")
+            # Checkpoint 1: Cancel before LLM launch
+            if cancel_event.is_set():
+                raise QueryCancelledError("Query cancelled before generation started.")
 
-    is_valid = raw_sql and (raw_sql.lower().startswith("select") or raw_sql.lower().startswith("with"))
-    if not is_valid:
-        return QuerySummaryResponse(
-            session_id=request_data.session_id, tech_summary=tech_summary, gen_summary=gen_summary,
-            error="SQL Validation Failed", message=_get_friendly_error("generation_failure", "")
-        )
+            # 2. Launch LLM Agentic Workflow as an async task
+            llm_task = asyncio.create_task(
+                execute_agentic_workflow(user_input, history, client_time)
+            )
 
-    db_iterator, exec_error = await _execute_sql_generator(engine, raw_sql)
+            # 3. Monitor LLM generation with progressive warnings and cancellation checks
+            while not llm_task.done():
+                if cancel_event.is_set():
+                    llm_task.cancel()
+                    raise QueryCancelledError("Query cancelled during reasoning generation.")
 
-    if exec_error:
-        return QuerySummaryResponse(
-            session_id=request_data.session_id, tech_summary=tech_summary, gen_summary="DB Error",
-            error=exec_error, message=_get_friendly_error("execution_error", "")
-        )
+                elapsed = time.perf_counter() - start_time
+                if warning_index < len(PROGRESSIVE_WARNING_SCHEDULE):
+                    thresh, warn_text = PROGRESSIVE_WARNING_SCHEDULE[warning_index]
+                    if elapsed >= thresh:
+                        yield json.dumps({"type": "warning", "warning": warn_text}) + "\n"
+                        warning_index += 1
 
-    # Feature 14: Graceful handling of Zero Rows
-    first_chunk, is_empty = None, False
-    try:
-        first_chunk = await db_iterator.__anext__()
-        if first_chunk.empty: is_empty = True
-    except StopAsyncIteration:
-        is_empty = True
+                await asyncio.sleep(0.5)
 
-    if is_empty:
-        async def empty_stream():
+            # Retrieve result from LLM task
+            rag_answer, updated_history = await llm_task
+            await save_history_async(session_id_str, updated_history, sql_executor)
+            history_persisted = True
+
+            # Checkpoint 2: Cancel after LLM before DB execution
+            if cancel_event.is_set():
+                raise QueryCancelledError("Query cancelled after SQL compilation.")
+
+            raw_sql, tech_summary, gen_summary = parse_rag_response(rag_answer)
+
+            # Safety Net SQL Formatter
+            if raw_sql and raw_sql != "NO_SQL":
+                raw_sql = re.sub(
+                    r'([a-zA-Z0-9_\]\'\"])(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|GROUP BY|ORDER BY|LIMIT|HAVING)\b', 
+                    r'\1 \n\2', 
+                    raw_sql 
+                )
+
+            # Conversational bypass
+            if raw_sql and "NO_SQL" in raw_sql:
+                yield json.dumps({
+                    "type": "metadata",
+                    "session_id": session_id_str,
+                    "tech_summary": "Chat",
+                    "gen_summary": gen_summary
+                }) + "\n"
+                return
+
+            is_valid = raw_sql and (raw_sql.lower().startswith("select") or raw_sql.lower().startswith("with"))
+            if not is_valid:
+                yield json.dumps({
+                    "type": "metadata",
+                    "session_id": session_id_str,
+                    "tech_summary": tech_summary,
+                    "gen_summary": gen_summary,
+                    "error": "SQL Validation Failed",
+                    "message": _get_friendly_error("generation_failure", "")
+                }) + "\n"
+                return
+
+            # Checkpoint 3: Pre-DB execution
+            if cancel_event.is_set():
+                raise QueryCancelledError("Query cancelled prior to database execution.")
+
+            engine = get_db_engine()
+            db_iterator, exec_error = await _execute_sql_generator(engine, raw_sql)
+
+            if exec_error:
+                yield json.dumps({
+                    "type": "metadata",
+                    "session_id": session_id_str,
+                    "tech_summary": tech_summary,
+                    "gen_summary": "DB Error",
+                    "error": exec_error,
+                    "message": _get_friendly_error("execution_error", "")
+                }) + "\n"
+                return
+
+            # Feature 14: Graceful handling of Zero Rows
+            first_chunk, is_empty = None, False
+            try:
+                first_chunk = await db_iterator.__anext__()
+                if first_chunk.empty:
+                    is_empty = True
+            except StopAsyncIteration:
+                is_empty = True
+
+            if is_empty:
+                yield json.dumps({
+                    "type": "metadata",
+                    "session_id": session_id_str,
+                    "tech_summary": tech_summary,
+                    "gen_summary": gen_summary + "\n\n**Note:** Zero records matched this query.",
+                    "raw_sql": raw_sql,
+                    "error": None
+                }) + "\n"
+                return
+
             yield json.dumps({
-                "type": "metadata", "session_id": session_id_str,
-                "tech_summary": tech_summary, 
-                "gen_summary": gen_summary + "\n\n**Note:** Zero records matched this query.",
-                "raw_sql": raw_sql, "error": None
+                "type": "metadata",
+                "session_id": session_id_str,
+                "tech_summary": tech_summary,
+                "gen_summary": gen_summary,
+                "raw_sql": raw_sql
             }) + "\n"
-        return StreamingResponse(empty_stream(), media_type="application/x-ndjson")
 
-    async def full_stream():
-        yield json.dumps({"type": "metadata", "session_id": session_id_str, "tech_summary": tech_summary, "gen_summary": gen_summary, "raw_sql": raw_sql}) + "\n"
-        
-        chunk = _sanitize_dataframe(first_chunk)
-        for row in chunk.to_dict('records'): yield json.dumps(row, default=str) + "\n"
-        
-        async for chunk_df in db_iterator:
-            chunk_df = _sanitize_dataframe(chunk_df)
-            for row in chunk_df.to_dict('records'):
+            # Checkpoint 4: First chunk streaming
+            if cancel_event.is_set():
+                raise QueryCancelledError("Query cancelled during result streaming.")
+
+            chunk = _sanitize_dataframe(first_chunk)
+            for row in chunk.to_dict('records'):
                 yield json.dumps(row, default=str) + "\n"
 
-    return StreamingResponse(full_stream(), media_type="application/x-ndjson")
+            # Stream remaining chunks with mid-flight checkpoint
+            async for chunk_df in db_iterator:
+                if cancel_event.is_set():
+                    raise QueryCancelledError("Query cancelled during result streaming.")
+                chunk_df = _sanitize_dataframe(chunk_df)
+                for row in chunk_df.to_dict('records'):
+                    yield json.dumps(row, default=str) + "\n"
+
+        except QueryCancelledError as qce:
+            logger.info(f"Query cancelled for session {session_id_str}: {qce}")
+            if history_persisted:
+                await rollback_cancelled_turn_async(session_id_str, sql_executor)
+            yield json.dumps({
+                "type": "error",
+                "error": "Query Cancelled",
+                "message": "Query execution was stopped by user request."
+            }) + "\n"
+
+        except asyncio.CancelledError:
+            logger.warning(f"Client disconnected or closed stream for session {session_id_str}")
+            if llm_task and not llm_task.done():
+                llm_task.cancel()
+            if history_persisted:
+                await rollback_cancelled_turn_async(session_id_str, sql_executor)
+            raise
+
+        except Exception as e:
+            logger.error(f"Stream exception for session {session_id_str}: {e}")
+            yield json.dumps({
+                "type": "error",
+                "error": str(e),
+                "message": _get_friendly_error("execution_error", str(e))
+            }) + "\n"
+
+        finally:
+            if active_cancellations.get(session_id_str) is cancel_event:
+                active_cancellations.pop(session_id_str, None)
+
+    return StreamingResponse(query_pipeline_stream(), media_type="application/x-ndjson")
+
+@app.post("/cancel_query/{session_id}")
+@app.post("/api/v1/query/cancel/{session_id}")
+async def cancel_query_endpoint(session_id: UUID):
+    """Signals cancellation to an active query stream for the specified session."""
+    sid = str(session_id)
+    if sid in active_cancellations:
+        active_cancellations[sid].set()
+        logger.info(f"Cancellation signal registered for session: {sid}")
+        return {"status": "success", "message": f"Cancellation requested for session {sid}."}
+    return {"status": "ignored", "message": f"No active query running for session {sid}."}
 
 @app.post("/api/v1/query/export")
 async def execute_and_return_excel(request_data: QueryRequest):
