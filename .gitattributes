@@ -1,0 +1,8 @@
+# Exclude databases, stores, and generated artifacts from GitHub code search and language stats
+*.db binary linguist-generated
+*.toon linguist-vendored
+chat_history_logs/* linguist-generated
+Glossary_Store/* linguist-vendored
+Schema_Store/* linguist-vendored
+scratch/* linguist-generated
+sql_venv/* linguist-vendored
