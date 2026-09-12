@@ -531,22 +531,6 @@ This software, source code, data architectures, system design patterns, workflow
 
 For official permission inquiries or enterprise licensing evaluation, contact **Bhavya Bhargava**.
 
----
-
-### Stop GitHub’s Public Code Search & AI from Indexing It
-
-If you want your repository to remain public so people with a direct link can view it, but you don't want it appearing in GitHub's global code searches or being scanned by AI tools like Copilot, look into these conditions:
-
-- **Private Visibility**: Making the repository private instantly excludes it from the public code-search index and automated AI indexers.
-- **Archive the Repository**: If you are done working on the project, you can mark the repository as **Archived (Read-Only)** in your repository settings. Archived repositories are completely excluded from GitHub's search index.
-- **Use `.gitattributes` to Exclude Files**: If you only want to hide specific vendor folders, dependencies, proprietary stores, or auto-generated files from GitHub's code search, add a `.gitattributes` file to your root directory and mark them:
-  ```text
-  path/to/folder/* linguist-vendored
-  path/to/generated/* linguist-generated
-  ```
-
----
-
 ### Acknowledgments
 
 - **LangChain** — for vector retrieval and message abstraction foundations.
