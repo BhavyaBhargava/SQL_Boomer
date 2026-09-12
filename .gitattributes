@@ -1,8 +1,24 @@
-# Exclude databases, stores, and generated artifacts from GitHub code search and language stats
+# ==============================================================================
+# GitHub Linguist Overrides: Suppress Public Code Search & AI Scrapers
+# ==============================================================================
+# Files and folders marked as 'linguist-vendored' or 'linguist-generated' are
+# excluded from GitHub's public code search index, language statistics, and AI scans.
+
+# Databases and binary storage
 *.db binary linguist-generated
+*.sqlite binary linguist-generated
+*.sqlite3 binary linguist-generated
+
+# Proprietary schema and business glossary stores
 *.toon linguist-vendored
-chat_history_logs/* linguist-generated
+*.json linguist-generated
 Glossary_Store/* linguist-vendored
 Schema_Store/* linguist-vendored
-scratch/* linguist-generated
+
+# Chat session history and cache directories
+chat_history_logs/* linguist-generated
+
+# Development and virtual environments
 sql_venv/* linguist-vendored
+scratch/* linguist-generated
+scratch_audit_test.py linguist-generated
