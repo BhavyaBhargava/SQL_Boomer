@@ -12,7 +12,7 @@
   <a href="https://pypi.org/project/python-toon/"><img src="https://img.shields.io/badge/Schema%20Format-TOON-purple.svg" alt="TOON Format" /></a>
   <a href="https://www.sqlite.org/"><img src="https://img.shields.io/badge/Database-SQLite%20%2F%20SQLAlchemy-003B57.svg?logo=sqlite&logoColor=white" alt="Database" /></a>
   <a href="https://openrouter.ai/"><img src="https://img.shields.io/badge/AI%20Reasoning-OpenRouter-black.svg" alt="AI Reasoning" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Proprietary%20%7C%20All%20Rights%20Reserved-red.svg" alt="Proprietary License" /></a>
 </p>
 
 ---
@@ -34,7 +34,7 @@
 - [Future Roadmap & Further Improvements](#future-roadmap--further-improvements)
 - [API Reference & Endpoints](#api-reference--endpoints)
 - [Getting Started & Local Development](#getting-started--local-development)
-- [License and Acknowledgments](#license-and-acknowledgments)
+- [Proprietary License & Terms of Use](#proprietary-license--terms-of-use)
 
 ---
 
@@ -100,93 +100,124 @@ SQL Boomer is engineered on four foundational architectural pillars:
 
 ## System Architecture & Data Flow
 
-The following sequence and architecture diagram illustrates the lifecycle of a request from client input to validated streaming rows and predictive next steps:
+SQL Boomer decouples data ingestion, agentic reasoning, deterministic safety, and database streaming into a cleanly structured, unidirectional execution pipeline supported by dedicated concurrent watchdogs.
+
+### 1. Primary Query Execution Pipeline
 
 ```mermaid
 flowchart TD
-    %% Client Layer
-    CLIENT(["Business User / Frontend Client"]):::client
-    REQ[/"POST /api/v1/query/stream<br/>(User Prompt, Session ID, Client Timestamp)"/]:::input
-
-    CLIENT --> REQ
-
-    %% Gateway & Concurrency Layer
-    subgraph GW ["1. API Gateway & Concurrency Control"]
-        LOCK["Acquire Per-Session asyncio.Lock<br/>(Serializes access to session log)"]:::process
-        HIST["Load Session History<br/>(Sanitizes recursive timestamps)"]:::process
-        CANCEL_INIT["Register active_cancellations Event"]:::process
+    %% Primary Ingestion
+    REQ[/"1. Client Ingestion<br/>POST /api/v1/query/stream<br/>(user_input, session_id, client_timestamp)"/]:::input
+    
+    %% Gateway & Locking
+    subgraph STAGE1 ["Stage 1: Session Gateway & Concurrency Lock"]
+        LOCK["Acquire Per-Session asyncio.Lock<br/>(Serializes disk and state mutations)"]:::process
+        LOAD_HIST["Load Session History & Clean Timestamps<br/>(Prevents recursive timestamp pollution)"]:::process
+        REG_CANCEL["Register Session in active_cancellations Registry"]:::process
+        LOCK --> LOAD_HIST --> REG_CANCEL
     end
-
-    REQ --> LOCK
-    LOCK --> HIST
-    HIST --> CANCEL_INIT
-
-    %% Hybrid Retrieval & Agentic Workflow
-    subgraph AGENT ["2. Multi-Stage Agentic Reasoning Pipeline"]
-        GLOSS_RET["Hybrid Glossary Retriever<br/>• FAISS Dense Semantic Search<br/>• BM25 Exact Lexical Keyword Search<br/>• Reciprocal Rank Fusion (RRF Scoring)"]:::process
-        REFORM["Phase 1: Contextual Reformulator (Nemotron / Chat LLM)<br/>• Resolves conversational slang with business logic<br/>• Calculates time ranges against client timestamp<br/>• Handles greetings via conversational bypass"]:::process
-        SCHEMA_RET["FAISS Schema Retriever<br/>• Ingests TOON Table Definitions"]:::process
-        SQL_GEN["Phase 2: Text-to-SQLite Generator (Codex LLM)<br/>• Applies SQLite date functions & table aliases<br/>• Formulates single query without mixed aggregations"]:::process
+    
+    REQ --> STAGE1
+    
+    %% Hybrid Retrieval
+    subgraph STAGE2 ["Stage 2: Hybrid Context Retrieval & Ranking"]
+        SCHEMA_FETCH["Load Schema TOON Context<br/>(Full table layouts, data types, and foreign keys)"]:::process
+        GLOSS_ENSEMBLE["Ensemble Glossary Search<br/>FAISS (Dense Semantic) + BM25 (Exact Lexical)<br/>Reciprocal Rank Fusion (RRF Scoring)"]:::process
+        SCHEMA_FETCH ~~~ GLOSS_ENSEMBLE
     end
-
-    CANCEL_INIT --> GLOSS_RET
-    GLOSS_RET --> REFORM
-    REFORM --> SCHEMA_RET
-    SCHEMA_RET --> SQL_GEN
-
-    %% Cancellation & Warning Watchdog
-    subgraph WATCHDOG ["3. Real-Time Monitor & Cancellation Engine"]
-        TIMER{"Progressive Warning Timer<br/>(45s, 90s, 135s, 180s, 225s)"}:::decision
-        WARN_EMIT[/"Yield Reassurance Warning (NDJSON)"/]:::stream
-        CANCEL_CHK{"Checkpoint Verification:<br/>User clicked Cancel or Disconnected?"}:::decision
-        ROLLBACK["Atomic History Rollback<br/>(remove_cancelled_interaction)"]:::process
+    
+    STAGE1 --> STAGE2
+    
+    %% Multi-Stage Agentic Reasoning
+    subgraph STAGE3 ["Stage 3: Dual-Stage Agentic Reasoning Engine"]
+        direction TB
+        REFORM["Phase 1: Contextual Query Reformulator<br/>(Resolves jargon against glossary & computes relative dates)"]:::process
+        BYPASS_CHECK{"Is Input a Greeting<br/>or Casual Chat?"}:::decision
+        BYPASS_RESP[/"Conversational Bypass<br/>(Emits Layman Greeting Event; skips DB)"/]:::stream
+        SQL_GEN["Phase 2: Text-to-SQLite Generator<br/>(Codex Model enforces aliases, table schemas, & single query)"]:::process
+        PARSE_RAG["RAG Response Parser<br/>(Extracts SQL, Technical Reasoning, Layman Summary)"]:::process
+        
+        REFORM --> BYPASS_CHECK
+        BYPASS_CHECK -->|Yes| BYPASS_RESP
+        BYPASS_CHECK -->|No| SQL_GEN
+        SQL_GEN --> PARSE_RAG
     end
-
-    SQL_GEN -.-> TIMER
-    TIMER -->|Interval Reached| WARN_EMIT
-    SQL_GEN -.-> CANCEL_CHK
-    CANCEL_CHK -->|Aborted| ROLLBACK
-    ROLLBACK --> CLIENT
-
-    %% Security & Formatting
-    subgraph SEC ["4. Deterministic Security & Syntax Gate"]
-        PARSER["parse_rag_response<br/>(Splits SQL, Tech Reasoning, Layman Explanation)"]:::process
-        SEC_FILTER{"_validate_sql_security<br/>• Must begin with SELECT or WITH<br/>• Disallows DROP, DELETE, UPDATE, PRAGMA<br/>• Regex safety-net keyword padding"}:::decision
+    
+    STAGE2 --> STAGE3
+    
+    %% Deterministic Security & Syntax Gate
+    subgraph STAGE4 ["Stage 4: Deterministic Security & Syntax Gate"]
+        SEC_CHECK{"Strict Security Validator<br/>• Begins with SELECT or WITH<br/>• Blocks DROP, DELETE, UPDATE, PRAGMA<br/>• Regex safety-net whitespace padding"}:::decision
+        SEC_REJECT[/"Reject Unsafe Query<br/>(Emits Friendly Error Event; halts pipeline)"/]:::error
+        SEC_CHECK -->|Violates Security| SEC_REJECT
     end
-
-    SQL_GEN --> PARSER
-    PARSER --> SEC_FILTER
-    SEC_FILTER -->|Violates Security| SEC_ERR[/"Yield Formatted Error (NDJSON)"/]:::error
-    SEC_ERR --> CLIENT
-
-    %% Database & Streaming
-    subgraph DB_LAYER ["5. Database Execution & Asynchronous Streaming"]
-        LAZY_DB["LazySQLDatabase Adapter<br/>(Bypasses eager SQLAlchemy table reflection)"]:::process
-        SQL_POOL["sql_executor Thread Pool (8 Workers)<br/>(Executes pd.read_sql_query with chunksize=500)"]:::process
-        STREAM_ROW[/"Yield NDJSON Stream:<br/>1. Metadata Event (SQL + Summaries)<br/>2. Sanitized Data Row Chunks"/]:::stream
+    
+    STAGE3 --> SEC_CHECK
+    
+    %% Database Execution & Streaming
+    subgraph STAGE5 ["Stage 5: Asynchronous Execution & Streaming Delivery"]
+        LAZY_DB["LazySQLDatabase Adapter<br/>(Bypasses expensive table reflection)"]:::process
+        SQL_EXEC["Execute pd.read_sql_query via sql_executor<br/>(Dedicated Thread Pool: 8 Workers, Chunksize=500)"]:::process
+        STREAM_GEN["Async NDJSON Stream Generator<br/>1. Yields Metadata Header (SQL + Summaries)<br/>2. Yields Sanitized Data Row Chunks"]:::stream
+        
+        LAZY_DB --> SQL_EXEC --> STREAM_GEN
     end
-
-    SEC_FILTER -->|Passed| LAZY_DB
-    LAZY_DB --> SQL_POOL
-    SQL_POOL --> STREAM_ROW
-    STREAM_ROW --> CLIENT
-
-    %% Sidecar Predictive Recommendations
-    subgraph PREDICT ["6. Real-Time Predictive Intelligence"]
-        FOLLOW_REQ[/"POST /get_predictive_followups"/]:::input
-        TRAJ["Extract Recent User Query Trajectory"]:::process
-        PRED_LLM["Generate 4 User-Perspective Action Buttons<br/>(Strict imperative commands, schema-grounded)"]:::process
-        FOLLOW_RESP[/"Return JSON Array of 4 Action Chips"/]:::stream
-    end
-
-    CLIENT -.-> FOLLOW_REQ
-    FOLLOW_REQ --> TRAJ
-    TRAJ --> PRED_LLM
-    PRED_LLM --> FOLLOW_RESP
-    FOLLOW_RESP -.-> CLIENT
+    
+    SEC_CHECK -->|Passed| STAGE5
+    
+    %% Final Client Delivery
+    CLIENT_OUT[/"2. Client Delivery<br/>(Live NDJSON Event Stream to Browser UI)"/]:::client
+    STREAM_GEN --> CLIENT_OUT
+    BYPASS_RESP --> CLIENT_OUT
+    SEC_REJECT --> CLIENT_OUT
 
     %% Styling Classes
+    classDef input fill:#1e293b,stroke:#818cf8,stroke-width:1.5px,color:#f8fafc;
+    classDef process fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#f8fafc;
+    classDef decision fill:#312e81,stroke:#a5b4fc,stroke-width:1.5px,color:#f8fafc;
+    classDef stream fill:#064e3b,stroke:#34d399,stroke-width:1.5px,color:#f8fafc;
+    classDef error fill:#7f1d1d,stroke:#f87171,stroke-width:1.5px,color:#f8fafc;
     classDef client fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+```
+
+---
+
+### 2. Guardrails, Cancellation & Predictive Sidecars
+
+In parallel with the primary pipeline, three dedicated background services govern real-time responsiveness, safety, and follow-up recommendations:
+
+```mermaid
+flowchart LR
+    %% Panel A: Cancellation
+    subgraph G1 ["A. Cancellation & Watchdog Engine"]
+        TIMER["Progressive Timer<br/>(Emits warnings at 45s, 90s, 135s, 180s, 225s)"]:::process
+        CANCEL_GATE{"4 Checkpoints Checked:<br/>1. Pre-LLM<br/>2. In-Flight LLM<br/>3. Pre-DB<br/>4. Mid-Stream"}:::decision
+        ABORT_ACTION["On Cancellation / Disconnect:<br/>1. Terminate Background LLM Task<br/>2. Rollback Uncommitted Turn from Disk<br/>3. Emit Cancellation Event"]:::error
+        
+        TIMER --> CANCEL_GATE --> ABORT_ACTION
+    end
+
+    %% Panel B: Predictive Intelligence
+    subgraph G2 ["B. Predictive Next-Step Follow-ups"]
+        PRED_REQ[/"POST /get_predictive_followups"/]:::input
+        TRAJ["Extract User Query Trajectory<br/>(Last 5 user queries)"]:::process
+        PRED_AGENT["Generate 4 User Action Chips<br/>(Imperative buttons, schema-grounded)"]:::process
+        PRED_OUT[/"Return JSON Array of 4 Follow-ups"/]:::stream
+        
+        PRED_REQ --> TRAJ --> PRED_AGENT --> PRED_OUT
+    end
+
+    %% Panel C: Glossary Lifecycle
+    subgraph G3 ["C. Dynamic Glossary Administration"]
+        GLOSS_REQ[/"POST /manage_business_glossary"/]:::input
+        GLOSS_PARSE["Dynamic Multi-Format Parser<br/>(Excel/CSV, ragged rows, WIP bounds)"]:::process
+        GLOSS_ROTATE["Sliding-Window Snapshot Rotation<br/>(Active -> v1 -> v2)"]:::process
+        GLOSS_RELOAD["Atomic Zero-Downtime Hot-Reload<br/>(Rebuilds FAISS/BM25 under glossary_lock)"]:::process
+        
+        GLOSS_REQ --> GLOSS_PARSE --> GLOSS_ROTATE --> GLOSS_RELOAD
+    end
+
+    %% Styling Classes
     classDef input fill:#1e293b,stroke:#818cf8,stroke-width:1.5px,color:#f8fafc;
     classDef process fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#f8fafc;
     classDef decision fill:#312e81,stroke:#a5b4fc,stroke-width:1.5px,color:#f8fafc;
@@ -482,11 +513,28 @@ python scratch_audit_test.py
 
 ---
 
-## License and Acknowledgments
+## Proprietary License & Terms of Use
 
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+**Copyright © 2026 Bhavya Bhargava. All rights reserved.**
+
+### Strict Proprietary & Permission Notice
+
+This software, source code, data architectures, system design patterns, workflows, prompts, algorithms, and associated documentation are **strictly proprietary and confidential**. 
+
+> [!CAUTION]
+> **Explicit Written Permission Required**:
+> Whosoever wishes to use, deploy, reproduce, reference, modify, or integrate this project—**or even a single component, utility, module, or architecture pattern thereof**—**MUST obtain prior, explicit written permission directly from Bhavya Bhargava**.
+
+- **No Open-Source Rights**: This repository is NOT open-source and is NOT licensed under MIT, Apache, GPL, or any permissive open-source license. No license or grant of rights is given by default to any individual, enterprise, government agency, or educational institution.
+- **Strict Prohibition on Component-Level Borrowing**: Disassembling, borrowing, adapting, or deploying ANY component (including but not limited to the Lazy Database adapter, cancellation engine, session locks, dynamic glossary parser, predictive follow-up service, or TOON schema integration) without prior express authorization is strictly prohibited.
+- **Enforcement & Legal Action**: In-eligibility or failure to obtain explicit written authorization prior to using any portion of this repository constitutes willful intellectual property infringement. Any unauthorized use, distribution, or reproduction will result in immediate legal action, statutory infringement claims, and all remedies available under civil and criminal law.
+
+For official permission inquiries or enterprise licensing evaluation, contact **Bhavya Bhargava**.
+
+---
 
 ### Acknowledgments
+
 - **LangChain** — for vector retrieval and message abstraction foundations.
 - **FAISS (Facebook AI Research)** — for ultra-fast dense similarity search.
 - **OpenRouter** — for unified API access to cutting-edge reasoning models.
