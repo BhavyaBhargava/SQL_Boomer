@@ -1,5 +1,3 @@
-# llm_rag_service.py
-
 import os
 import shutil
 import re

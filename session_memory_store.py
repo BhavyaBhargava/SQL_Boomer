@@ -1,5 +1,3 @@
-# storage_service.py
-
 import json
 import os
 import re

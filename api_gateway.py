@@ -1,5 +1,3 @@
-# main.py
-
 import io
 import os
 import re
