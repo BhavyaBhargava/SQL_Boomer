@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import pandas as pd
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
 from sqlalchemy import create_engine, text
+from langchain_community.utilities.sql_database import SQLDatabase
 
 # --- Local Services ---
 from query_intelligence_service import (
@@ -42,18 +43,37 @@ app.add_middleware(
 )
 
 # ==============================================================================
-# 0. CONCURRENCY & LIMITS
+# 0. CONCURRENCY & DEDICATED THREAD POOLS
 # ==============================================================================
-sql_executor = ThreadPoolExecutor(max_workers=8)
-excel_executor = ThreadPoolExecutor(max_workers=3)
+sql_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sql_worker")
+excel_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="excel_worker")
+llm_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="llm_worker")
 
 MAX_EXCEL_ROWS = 150000 
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "sqlite:///enterprise_mock.db")
 
 # ==============================================================================
-# 1. DATABASE CONNECTION (SQLite)
+# 1. DATABASE CONNECTION & LAZY SQL DATABASE WRAPPER
 # ==============================================================================
+class LazySQLDatabase(SQLDatabase):
+    """
+    Lightweight SQLDatabase wrapper that bypasses eager table metadata reflection.
+    Prevents startup hangs or crashes on legacy schemas with complex constraints.
+    """
+    def __init__(self, engine):
+        self._engine = engine
+        self._schema = None
+        self._metadata = None
+        self.include_tables = []
+        self.ignore_tables = []
+        self._sample_rows_in_table_info = 0
+
+    @property
+    def engine(self):
+        return self._engine
+
 _global_engine = None
+_global_lazy_db = None
 
 def get_db_engine():
     """Returns a globally pooled SQLAlchemy engine for SQLite."""
@@ -61,6 +81,14 @@ def get_db_engine():
     if _global_engine is None:
         _global_engine = create_engine(SQLITE_DB_PATH, pool_size=5, max_overflow=10)
     return _global_engine
+
+def get_db_connection() -> LazySQLDatabase:
+    """Returns a lazy SQLDatabase wrapper bypassing expensive startup reflection."""
+    global _global_lazy_db
+    if _global_lazy_db is None:
+        engine = get_db_engine()
+        _global_lazy_db = LazySQLDatabase(engine)
+    return _global_lazy_db
 
 # ==============================================================================
 # 2. PYDANTIC MODELS
