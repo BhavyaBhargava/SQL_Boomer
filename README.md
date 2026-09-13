@@ -1,5 +1,5 @@
 <p align="center">
-  <h1>⚡ SQL Boomer</h1>
+  <img src="logo.jpg" alt="SQL Boomer" width="650" style="max-width: 100%; height: auto;" />
 </p>
 
 > **Autonomous, Fault-Tolerant Human-to-Database Translation Engine.**  
